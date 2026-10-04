@@ -15,9 +15,9 @@ class Settings(BaseSettings):
     environment: Literal["development", "production"] = "development"
     log_level: str = "INFO"
     api_prefix: str = "/api"
-    cors_origins: list[str] = ["http://localhost:5173"]
+    cors_origins: list[str] = ["http://localhost:5180"]
     host: str = "0.0.0.0"
-    port: int = 8000
+    port: int = 8010
 
     # LLM (Groq)
     groq_api_key: SecretStr | None = None
