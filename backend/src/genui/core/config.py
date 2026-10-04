@@ -25,7 +25,7 @@ class Settings(BaseSettings):
     llm_temperature: float = 0.4
     llm_max_tokens: int = 8192
     llm_timeout_seconds: float = 60.0
-    llm_max_retries: int = 2
+    llm_max_retries: int = 3  # transient errors (429/5xx/connection), with visible status
     llm_reasoning_effort: Literal["low", "medium", "high"] | None = "medium"
 
     # Agent
@@ -33,6 +33,7 @@ class Settings(BaseSettings):
     agent_max_ui_repairs: int = 2
     history_max_messages: int = 40
     tool_result_max_chars: int = 12_000
+    history_tool_result_chars: int = 1_500  # past turns' tool results are truncated to this
 
     # Database
     database_url: str = "sqlite+aiosqlite:///./fitgen.db"

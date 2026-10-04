@@ -41,10 +41,33 @@ StreamItem = TextDelta | Completion
 
 
 class LLMError(Exception):
-    def __init__(self, message: str, *, code: str | None = None, status: int | None = None):
+    def __init__(
+        self,
+        message: str,
+        *,
+        code: str | None = None,
+        status: int | None = None,
+        retry_after: float | None = None,
+    ):
         super().__init__(message)
         self.code = code
         self.status = status
+        self.retry_after = retry_after
+
+    @property
+    def is_retryable(self) -> bool:
+        """Transient failures: rate limits, server errors, connection problems.
+
+        A single request larger than the tokens-per-minute budget can never succeed, so it is
+        not retryable even though Groq reports it as a rate limit.
+        """
+        if "request too large" in str(self).lower():
+            return False
+        return (
+            self.status == 429
+            or (self.status is not None and self.status >= 500)
+            or self.code == "connection_error"
+        )
 
     @property
     def is_tool_use_failure(self) -> bool:

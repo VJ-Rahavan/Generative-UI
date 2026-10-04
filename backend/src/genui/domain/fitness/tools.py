@@ -195,12 +195,34 @@ class ProgressArgs(BaseModel):
     days: int = Field(90, ge=7, le=730)
 
 
+def _resolve_logged_exercise(query: str, logged: set[str]) -> str:
+    """Map a loose name ('squat', 'bench') to what the user actually logged when unambiguous."""
+    name = lib.canonical_name(query)
+    if name in logged:
+        return name
+    key = query.strip().lower()
+    matches = [e for e in logged if key in e.lower()]
+    if len(matches) == 1:
+        return matches[0]
+    if len(matches) > 1:
+        raise ToolError(f"'{query}' is ambiguous. Logged exercises matching: {', '.join(matches)}.")
+    return name
+
+
 @registry.tool(label="Analyzing exercise progress")
 async def get_exercise_progress(args: ProgressArgs, ctx: ToolContext) -> dict[str, Any]:
     """Per-session progression for one exercise: top weight, estimated 1RM and volume over time."""
-    name = lib.canonical_name(args.exercise)
     since = date.today() - timedelta(days=args.days)
     async with ctx.session_factory() as session:
+        logged = set(
+            await session.scalars(
+                select(WorkoutSet.exercise)
+                .join(WorkoutSession)
+                .where(WorkoutSession.user_id == ctx.user_id)
+                .distinct()
+            )
+        )
+        name = _resolve_logged_exercise(args.exercise, logged)
         rows = (
             await session.execute(
                 select(WorkoutSession.performed_on, WorkoutSet.weight_kg, WorkoutSet.reps)
@@ -213,17 +235,11 @@ async def get_exercise_progress(args: ProgressArgs, ctx: ToolContext) -> dict[st
                 .order_by(WorkoutSession.performed_on)
             )
         ).all()
-        if not rows:
-            logged = await session.scalars(
-                select(WorkoutSet.exercise)
-                .join(WorkoutSession)
-                .where(WorkoutSession.user_id == ctx.user_id)
-                .distinct()
-            )
-            raise ToolError(
-                f"No sets of '{name}' logged in the last {args.days} days. "
-                f"Exercises with history: {', '.join(sorted(logged)) or 'none'}."
-            )
+    if not rows:
+        raise ToolError(
+            f"No sets of '{name}' logged in the last {args.days} days. "
+            f"Exercises with history: {', '.join(sorted(logged)) or 'none'}."
+        )
 
     by_day: dict[date, list[tuple[float, int]]] = defaultdict(list)
     for performed_on, weight, reps in rows:

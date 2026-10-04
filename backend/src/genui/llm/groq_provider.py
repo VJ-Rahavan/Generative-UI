@@ -32,7 +32,8 @@ class GroqProvider:
             self._client = AsyncGroq(
                 api_key=settings.groq_api_key.get_secret_value(),
                 timeout=settings.llm_timeout_seconds,
-                max_retries=settings.llm_max_retries,  # SDK retries 429/5xx/connection errors
+                # Retries are done by the agent so it can tell the user what's happening.
+                max_retries=0,
             )
 
     @property
@@ -123,4 +124,11 @@ def _to_llm_error(exc: groq.APIStatusError) -> LLMError:
             message = err.get("message") or message
     if exc.status_code == 429:
         code = code or "rate_limited"
-    return LLMError(message, code=code, status=exc.status_code)
+    retry_after: float | None = None
+    header = exc.response.headers.get("retry-after")
+    if header:
+        try:
+            retry_after = float(header)
+        except ValueError:
+            retry_after = None
+    return LLMError(message, code=code, status=exc.status_code, retry_after=retry_after)
