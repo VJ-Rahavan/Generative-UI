@@ -1,10 +1,9 @@
-import type { ComponentType } from 'react'
+import { lazy, Suspense, type ComponentType } from 'react'
 import type { UINode, UINodeType } from '../../types/ui'
 import { ComponentErrorBoundary } from './ErrorBoundary'
 import { AlertView } from './components/AlertView'
 import { ButtonView } from './components/ButtonView'
 import { CardView } from './components/CardView'
-import { ChartView } from './components/ChartView'
 import { ExerciseCardView } from './components/ExerciseCardView'
 import { FormView } from './components/FormView'
 import { LayoutView } from './components/LayoutView'
@@ -15,6 +14,19 @@ import { TableView } from './components/TableView'
 import { TextView } from './components/TextView'
 import { TimerView } from './components/TimerView'
 import { WorkoutPlanView } from './components/WorkoutPlanView'
+
+// Recharts is large: load it the first time a chart is rendered.
+const LazyChart = lazy(() =>
+  import('./components/ChartView').then((m) => ({ default: m.ChartView })),
+)
+
+function ChartView(props: { node: Extract<UINode, { type: 'chart' }> }) {
+  return (
+    <Suspense fallback={<div className="h-72 animate-pulse rounded-2xl bg-surface" />}>
+      <LazyChart {...props} />
+    </Suspense>
+  )
+}
 
 type Registry = { [K in UINodeType]: ComponentType<{ node: Extract<UINode, { type: K }> }> }
 

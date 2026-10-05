@@ -49,7 +49,9 @@ class MetricComponent(_Model):
     unit: str | None = None
     change_pct: float | None = Field(None, description="Percent change vs previous period")
     good_direction: Literal["up", "down"] = Field(
-        "up", description="Which direction of change is good, e.g. 'down' for weight on a cut"
+        "up",
+        description="Direction of change that is good for the user: 'up' for sessions, volume, "
+        "strength, streaks; 'down' only for things like body weight/fat on a cut",
     )
     caption: str | None = None
     icon: Icon | None = None
@@ -89,7 +91,6 @@ class TableComponent(_Model):
 class ChartSeries(_Model):
     key: str = Field(description="Key in each data row holding this series' numeric value")
     label: str | None = None
-    color: str | None = Field(None, description="CSS color; omit to use the theme palette")
 
 
 class ChartComponent(_Model):

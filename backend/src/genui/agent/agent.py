@@ -13,6 +13,7 @@ Per user turn:
 import asyncio
 import json
 import logging
+import re
 import uuid
 from collections.abc import AsyncIterator, Callable
 from dataclasses import dataclass, field
@@ -31,12 +32,49 @@ from genui.ui.validation import parse_ui_arguments
 logger = logging.getLogger(__name__)
 
 _MAX_TOOL_USE_RETRIES = 2
+_UI_AS_TEXT_NUDGE = (
+    "[system] You wrote UI JSON as message text, which the user cannot see as an interface. "
+    "Call the render_ui tool with the components instead, and fix any invalid fields."
+)
 _MAX_RETRY_DELAY_SECONDS = 60.0
 
 
 @dataclass(slots=True, frozen=True)
 class _RetryNotice:
     message: str
+
+
+class _TextGate:
+    """Streams assistant text, but holds it back when it starts like JSON or a code fence —
+    i.e. the model wrote a UI spec as text instead of calling `render_ui`. Held text is
+    recovered as real UI (or released as text) once the step completes."""
+
+    def __init__(self) -> None:
+        self._buffer = ""
+        self._mode: str = "undecided"  # -> "stream" | "hold"
+
+    @property
+    def held(self) -> bool:
+        return self._mode == "hold"
+
+    def feed(self, delta: str) -> str:
+        """Return the text to forward to the client now."""
+        if self._mode == "stream":
+            return delta
+        self._buffer += delta
+        if self._mode == "hold":
+            return ""
+        stripped = self._buffer.lstrip()
+        if not stripped:
+            return ""
+        if stripped[0] in "{[`":
+            self._mode = "hold"
+            return ""
+        self._mode = "stream"
+        return self._buffer
+
+
+_FENCE = re.compile(r"^```[a-zA-Z]*\s*|\s*```$")
 
 
 class ConversationNotFoundError(Exception):
@@ -119,14 +157,38 @@ class ChatAgent:
         try:
             for _ in range(self._settings.agent_max_steps):
                 completion: Completion | None = None
+                gate = _TextGate()
                 async for item in self._stream_with_retry(messages):
                     if isinstance(item, TextDelta):
-                        yield AgentEvent("text", {"delta": item.text})
+                        if visible := gate.feed(item.text):
+                            yield AgentEvent("text", {"delta": visible})
                     elif isinstance(item, _RetryNotice):
                         yield AgentEvent("status", {"message": item.message})
                     else:
                         completion = item
                 assert completion is not None
+
+                if not completion.tool_calls and gate.held:
+                    # The model wrote JSON as text. Recover it as UI if it's a valid spec.
+                    ui_text = _FENCE.sub("", completion.text.strip())
+                    if parse_ui_arguments(ui_text).ok:
+                        call = ToolCall(
+                            id=f"call_{uuid.uuid4().hex[:12]}", name=RENDER_UI_TOOL,
+                            arguments=ui_text,
+                        )  # fmt: skip
+                        completion = Completion(text="", tool_calls=[call])
+                    elif '"type"' in ui_text or "components" in ui_text:
+                        ui_failures += 1
+                        if ui_failures > self._settings.agent_max_ui_repairs:
+                            yield _error("Sorry, I couldn't build a valid interface for that. "
+                                         "Try rephrasing your request.", "ui_invalid")  # fmt: skip
+                            return
+                        messages.append({"role": "assistant", "content": completion.text})
+                        messages.append({"role": "user", "content": _UI_AS_TEXT_NUDGE})
+                        yield AgentEvent("status", {"message": "Refining the interface…"})
+                        continue
+                    else:
+                        yield AgentEvent("text", {"delta": completion.text})
 
                 if not completion.tool_calls:
                     if completion.text.strip():
@@ -140,7 +202,7 @@ class ChatAgent:
                     return
 
                 step = _Step(assistant=_assistant_message(completion))
-                if completion.text.strip():
+                if completion.text.strip() and not gate.held:
                     step.display.append({"type": "text", "text": completion.text})
 
                 for call in completion.tool_calls:

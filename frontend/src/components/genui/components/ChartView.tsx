@@ -38,7 +38,7 @@ const tooltipProps = {
 export function ChartView({ node }: { node: ChartNode }) {
   const series = node.series.map((s, i) => ({
     ...s,
-    color: s.color ?? PALETTE[i % PALETTE.length],
+    color: PALETTE[i % PALETTE.length], // always on-theme
     name: s.label ?? s.key,
   }))
   const unit = node.unit ? ` ${node.unit}` : ''

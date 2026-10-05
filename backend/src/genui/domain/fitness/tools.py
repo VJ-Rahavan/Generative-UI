@@ -146,9 +146,20 @@ async def log_workout(args: LogWorkoutArgs, ctx: ToolContext) -> dict[str, Any]:
             duration_min=args.duration_min,
             notes=args.notes,
         )
+        logged = set(
+            await session.scalars(
+                select(WorkoutSet.exercise)
+                .join(WorkoutSession)
+                .where(WorkoutSession.user_id == ctx.user_id)
+                .distinct()
+            )
+        )
         prs = []
         for item in args.exercises:
-            name = lib.canonical_name(item.exercise)
+            try:  # keep names consistent with history so progress/PRs line up
+                name = _resolve_logged_exercise(item.exercise, logged)
+            except ToolError:
+                name = lib.canonical_name(item.exercise)
             previous_best = await session.scalar(
                 select(func.max(WorkoutSet.weight_kg * (1 + WorkoutSet.reps / 30.0)))
                 .join(WorkoutSession)
@@ -277,10 +288,12 @@ class SummaryArgs(BaseModel):
 @registry.tool(label="Building your training summary")
 async def get_training_summary(args: SummaryArgs, ctx: ToolContext) -> dict[str, Any]:
     """Dashboard stats: sessions, sets, volume, sets per muscle group, comparison with the
-    previous period and weekly volume for the last 8 weeks."""
+    previous period, weekly volume for the last 8 *completed* weeks (`weekly`) and the
+    in-progress current week (`current_week`) kept separate so trends aren't skewed."""
     today = date.today()
+    this_week = _week_start(today)
     period_start = today - timedelta(days=args.days - 1)
-    lookback = min(period_start - timedelta(days=args.days), today - timedelta(weeks=8))
+    lookback = min(period_start - timedelta(days=args.days), this_week - timedelta(weeks=8))
     sessions = await _sessions_since(ctx, lookback)
 
     current = [s for s in sessions if s.performed_on >= period_start]
@@ -308,8 +321,8 @@ async def get_training_summary(args: SummaryArgs, ctx: ToolContext) -> dict[str,
             muscle_sets[lib.muscle_group(st.exercise)] += 1
 
     weekly: dict[date, dict[str, Any]] = {}
-    for i in range(7, -1, -1):
-        wk = _week_start(today) - timedelta(weeks=i)
+    for i in range(8, -1, -1):  # 8 completed weeks + the current one
+        wk = this_week - timedelta(weeks=i)
         weekly[wk] = {"week": wk.isoformat(), "sessions": 0, "volume_kg": 0}
     for s in sessions:
         wk = _week_start(s.performed_on)
@@ -328,7 +341,8 @@ async def get_training_summary(args: SummaryArgs, ctx: ToolContext) -> dict[str,
         "sets_by_muscle": sorted(
             ({"muscle": m, "sets": n} for m, n in muscle_sets.items()), key=lambda x: -x["sets"]
         ),
-        "weekly": list(weekly.values()),
+        "weekly": [w for wk, w in weekly.items() if wk < this_week],
+        "current_week": {**weekly[this_week], "days_elapsed": today.weekday() + 1, "partial": True},
         "recent_sessions": [
             {"date": s.performed_on.isoformat(), "name": s.name} for s in current[:5]
         ],

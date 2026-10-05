@@ -65,7 +65,6 @@ export interface TableNode {
 export interface ChartSeries {
   key: string
   label?: string
-  color?: string
 }
 
 export interface ChartNode {
