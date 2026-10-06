@@ -6,7 +6,8 @@ dashboard of metrics, charts, tables and buttons on the fly. Clicking a button o
 sends the interaction back to the model, which acts on it (logging a workout, saving a plan,
 calculating macros) and renders the result.
 
-- **Backend:** Python 3.12, FastAPI, Groq (`openai/gpt-oss-120b`), Pydantic v2, SQLAlchemy 2 (async)
+- **Backend:** Python 3.12, FastAPI, LangChain (`ChatGroq` + `StructuredTool`s) on Groq (`openai/gpt-oss-120b`),
+  Pydantic v2, SQLAlchemy 2 (async), optional LangSmith tracing
 - **Frontend:** React 19, TypeScript, Vite, Tailwind CSS v4, Recharts
 
 ## How it works
@@ -16,7 +17,7 @@ calculating macros) and renders the result.
           │
           ▼
  POST /api/chat ──► Agent loop (backend/src/genui/agent/agent.py)
-                      │  1. Stream the LLM (Groq) with tools:
+                      │  1. Stream the LLM (LangChain ChatGroq) with tools:
                       │       data tools  → read/write the DB (workouts, metrics, plans…)
                       │       render_ui   → a list of UI components
                       │  2. Validate render_ui against the Pydantic component catalog.
@@ -68,8 +69,8 @@ backend/src/genui/
     components.py       ★ The component catalog (Pydantic): the LLM ↔ frontend contract
     validation.py       Parses and validates render_ui arguments
     catalog.py          Compact catalog text for the system prompt (generated from the models)
-  llm/                  LLMProvider protocol + Groq streaming implementation
-  tools/registry.py     @registry.tool decorator: typed tools with arguments validated by Pydantic
+  llm/                  LLMProvider protocol + LangChain implementation (ChatGroq, message conversion)
+  tools/registry.py     @registry.tool → LangChain StructuredTool; register() accepts any LangChain tool
   agent/
     agent.py            ★ The agent loop (streaming, tools, UI validation/repair, retries)
     prompts.py          Generic UI rules + render_ui tool definition
@@ -104,9 +105,31 @@ async def get_training_streak(args: StreakArgs, ctx: ToolContext) -> dict[str, A
     ...
 ```
 
-The decorator registers the tool, turns the arguments model into the JSON schema the LLM sees,
-and validates the arguments the LLM sends. Raise `ToolError("…")` for expected failures; the
-message goes back to the model.
+The decorator wraps the function in a LangChain `StructuredTool`: the arguments model becomes
+its `args_schema` (the JSON schema the LLM sees) and validates what the LLM sends. The
+per-request `ToolContext` (user id, DB sessions) is passed through LangChain's `RunnableConfig`,
+so the model never sees it. Raise `ToolError("…")` for expected failures; the message goes back
+to the model.
+
+Ready-made LangChain tools plug in directly:
+
+```python
+from langchain_core.tools import tool
+
+@tool
+def convert_lb_to_kg(pounds: float) -> float:
+    """Convert pounds to kilograms."""
+    return round(pounds * 0.453592, 2)
+
+registry.register(convert_lb_to_kg, label="Converting units")
+```
+
+### Switch LLM provider
+
+The agent only depends on a LangChain `BaseChatModel`. To use another provider, install its
+integration (e.g. `uv add langchain-openai`) and return that model from `build_chat_model()` in
+`backend/src/genui/llm/langchain_provider.py`. The provider needs to support tool calling and
+streaming.
 
 ### Add a UI component
 
@@ -133,6 +156,7 @@ Settings come from environment variables or `backend/.env` (see `backend/.env.ex
 | `LLM_MAX_RETRIES` | `3` | Retries on rate limits and server errors, shown to the user as a status message |
 | `AGENT_MAX_STEPS` / `AGENT_MAX_UI_REPAIRS` | `8` / `2` | Limits per turn |
 | `HISTORY_MAX_MESSAGES` | `40` | Messages from earlier turns sent to the model (compacted) |
+| `LANGSMITH_TRACING` / `LANGSMITH_API_KEY` / `LANGSMITH_PROJECT` | `false` / — / `fitgen` | Optional tracing: each chat turn is one trace, with its LLM and tool calls nested inside |
 | `DATABASE_URL` | `sqlite+aiosqlite:///./fitgen.db` | For Postgres: `postgresql+asyncpg://…` and `uv sync --extra postgres` |
 | `SEED_DEMO_DATA` | `true` | Seeds demo history for an empty user |
 | `PORT` / `CORS_ORIGINS` | `8010` / `["http://localhost:5180"]` | |
@@ -167,7 +191,9 @@ Interactive API docs: http://localhost:8010/docs
 - **Security:** authentication (everything runs as a single `demo` user; every table already
   has a `user_id` column), input limits per user
 - **Rate limiting** per user/IP
-- **Observability:** structured logs, metrics, tracing
+- **Observability:** structured logs and metrics (LLM and tool tracing is available through LangSmith)
 - **Testing:** pytest with a fake LLM (the provider is behind a protocol) and frontend tests
+- **LangGraph:** skipped for now. The tools are already LangChain tools, so a LangGraph agent could reuse them
+  if we need human approval steps, multiple agents or resumable workflows
 - **Deployment:** Docker, docker-compose (API + web + Postgres), CI
 - **Schema migrations:** tables are created with `create_all`; schema changes currently need `make reset-db`

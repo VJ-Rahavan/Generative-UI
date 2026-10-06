@@ -19,6 +19,8 @@ from collections.abc import AsyncIterator, Callable
 from dataclasses import dataclass, field
 from typing import Any
 
+from langsmith import traceable
+
 from genui.agent.events import AgentEvent
 from genui.agent.history import compact_history
 from genui.agent.prompts import RENDER_UI_SPEC, RENDER_UI_TOOL
@@ -138,9 +140,24 @@ class ChatAgent:
             yield event
         yield AgentEvent("done", {})
 
+    @traceable(
+        run_type="chain",
+        name="chat_turn",
+        process_inputs=lambda inputs: {
+            "user_id": inputs.get("user_id"),
+            "conversation_id": inputs.get("conversation_id"),
+            "input": getattr(inputs.get("user_input"), "llm_content", None),
+        },
+        reduce_fn=lambda events: {
+            "events": [e.type for e in events],
+            "ui": [e.data for e in events if e.type == "ui"],
+        },
+    )
     async def _run_turn(
         self, user_id: str, conversation_id: str | None, user_input: UserInput
     ) -> AsyncIterator[AgentEvent]:
+        """One user turn. Traced as a single LangSmith run (LLM + tool calls nested) when
+        tracing is enabled; a no-op otherwise."""
         conversation_id, title, history = await self._start_turn(
             user_id, conversation_id, user_input
         )

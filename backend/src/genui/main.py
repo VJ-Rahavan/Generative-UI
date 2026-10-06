@@ -13,11 +13,12 @@ from genui.api.deps import AppContainer
 from genui.api.router import api_router
 from genui.core.config import get_settings
 from genui.core.logging import configure_logging
+from genui.core.tracing import configure_tracing
 from genui.db.session import Database
 from genui.domain.fitness.prompt import FITNESS_PERSONA
 from genui.domain.fitness.seed import seed_demo_data
 from genui.domain.fitness.tools import registry as fitness_tools
-from genui.llm import GroqProvider
+from genui.llm import LangChainProvider, build_chat_model
 
 logger = logging.getLogger(__name__)
 
@@ -26,13 +27,14 @@ logger = logging.getLogger(__name__)
 async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     settings = get_settings()
     configure_logging(settings.log_level)
+    configure_tracing(settings)
 
     db = Database(settings.database_url, echo=settings.database_echo)
     await db.create_all()
     if settings.seed_demo_data:
         await seed_demo_data(db.session_factory, settings.default_user_id)
 
-    llm = GroqProvider(settings)
+    llm = LangChainProvider(build_chat_model(settings), model_name=settings.groq_model)
     if not settings.llm_configured:
         logger.warning("GROQ_API_KEY is not set — chat requests will return an error event.")
 

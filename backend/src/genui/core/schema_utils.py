@@ -1,9 +1,8 @@
-"""Helpers for turning Pydantic models into compact, LLM-friendly JSON schemas."""
+"""Helpers for compact, LLM-friendly JSON schemas and validation errors."""
 
-import copy
 from typing import Any
 
-from pydantic import BaseModel, ValidationError
+from pydantic import ValidationError
 
 
 def strip_titles(node: Any, *, in_properties: bool = False) -> Any:
@@ -18,35 +17,6 @@ def strip_titles(node: Any, *, in_properties: bool = False) -> Any:
     if isinstance(node, list):
         return [strip_titles(item) for item in node]
     return node
-
-
-def inline_refs(schema: dict[str, Any]) -> dict[str, Any]:
-    """Inline non-recursive `$ref`s so tool parameter schemas are flat and self-contained."""
-    defs = schema.get("$defs", {})
-
-    def resolve(node: Any, seen: frozenset[str]) -> Any:
-        if isinstance(node, dict):
-            ref = node.get("$ref")
-            if isinstance(ref, str) and ref.startswith("#/$defs/"):
-                name = ref.removeprefix("#/$defs/")
-                if name in seen:  # recursive type: leave the ref in place
-                    return node
-                target = copy.deepcopy(defs[name])
-                extras = {k: v for k, v in node.items() if k != "$ref"}
-                return resolve({**target, **extras}, seen | {name})
-            return {k: resolve(v, seen) for k, v in node.items() if k != "$defs"}
-        if isinstance(node, list):
-            return [resolve(item, seen) for item in node]
-        return node
-
-    return resolve(schema, frozenset())
-
-
-def llm_json_schema(model: type[BaseModel], *, inline: bool = True) -> dict[str, Any]:
-    schema = model.model_json_schema()
-    if inline:
-        schema = inline_refs(schema)
-    return strip_titles(schema)
 
 
 def format_validation_error(exc: ValidationError, *, max_errors: int = 15) -> str:

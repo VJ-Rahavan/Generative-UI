@@ -1,12 +1,18 @@
-"""Tool registry: typed async functions the LLM can call to read/write real data.
+"""Tool registry built on LangChain tools.
+
+Domain tools are plain typed async functions:
 
     registry = ToolRegistry()
 
     @registry.tool(label="Searching exercises")
     async def search_exercises(args: SearchArgs, ctx: ToolContext) -> dict: ...
 
-The first parameter's Pydantic model defines the JSON schema sent to the LLM and validates
-the arguments it returns. The docstring becomes the tool description.
+The decorator wraps each one in a LangChain `StructuredTool` (the args model becomes its
+`args_schema`, the docstring its description). Any other LangChain `BaseTool` — e.g. from
+`langchain-community` — can be added with `registry.register(tool)`.
+
+The per-request `ToolContext` (user id, DB sessions) is passed through LangChain's
+`RunnableConfig`, so it never appears in the schema the LLM sees.
 """
 
 import inspect
@@ -16,12 +22,17 @@ from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from typing import Any, get_type_hints
 
+from langchain_core.runnables import RunnableConfig
+from langchain_core.tools import BaseTool, StructuredTool
+from langchain_core.utils.function_calling import convert_to_openai_tool
 from pydantic import BaseModel, ValidationError
 
-from genui.core.schema_utils import format_validation_error, llm_json_schema
+from genui.core.schema_utils import format_validation_error
 from genui.db.session import SessionFactory
 
 logger = logging.getLogger(__name__)
+
+TOOL_CONTEXT_KEY = "genui_tool_context"
 
 
 class ToolError(Exception):
@@ -49,21 +60,34 @@ ToolFunc = Callable[[Any, ToolContext], Awaitable[Any]]
 
 @dataclass(frozen=True, slots=True)
 class Tool:
-    name: str
-    description: str
+    """A registered LangChain tool plus UI metadata."""
+
+    lc_tool: BaseTool
     label: str
-    args_model: type[BaseModel]
-    func: ToolFunc
+
+    @property
+    def name(self) -> str:
+        return self.lc_tool.name
+
+    @property
+    def description(self) -> str:
+        return self.lc_tool.description
 
     def spec(self) -> dict[str, Any]:
-        return {
-            "type": "function",
-            "function": {
-                "name": self.name,
-                "description": self.description,
-                "parameters": llm_json_schema(self.args_model),
-            },
-        }
+        """OpenAI-format function spec, as sent to the chat model."""
+        return convert_to_openai_tool(self.lc_tool)
+
+
+def _with_context(func: ToolFunc, args_model: type[BaseModel]) -> Callable[..., Awaitable[Any]]:
+    """Adapt `func(args, ctx)` to LangChain's kwargs-based call, reading ctx from the config."""
+
+    async def run(config: RunnableConfig, **kwargs: Any) -> Any:
+        ctx = (config.get("configurable") or {}).get(TOOL_CONTEXT_KEY)
+        if not isinstance(ctx, ToolContext):
+            raise ToolError("Tool context is missing.")
+        return await func(args_model.model_validate(kwargs), ctx)
+
+    return run
 
 
 class ToolRegistry:
@@ -79,23 +103,24 @@ class ToolRegistry:
             if not (isinstance(args_model, type) and issubclass(args_model, BaseModel)):
                 raise TypeError(f"{func.__name__}: first parameter must be a Pydantic model")
             tool_name = name or func.__name__
-            self.register(
-                Tool(
-                    name=tool_name,
-                    description=inspect.getdoc(func) or tool_name,
-                    label=label or tool_name.replace("_", " ").capitalize(),
-                    args_model=args_model,
-                    func=func,
-                )
+            lc_tool = StructuredTool.from_function(
+                coroutine=_with_context(func, args_model),
+                name=tool_name,
+                description=inspect.getdoc(func) or tool_name,
+                args_schema=args_model,
             )
+            self.register(lc_tool, label=label)
             return func
 
         return decorator
 
-    def register(self, tool: Tool) -> None:
-        if tool.name in self._tools:
-            raise ValueError(f"Tool '{tool.name}' is already registered")
-        self._tools[tool.name] = tool
+    def register(self, lc_tool: BaseTool, *, label: str | None = None) -> None:
+        """Register any LangChain tool (custom or from the LangChain ecosystem)."""
+        if lc_tool.name in self._tools:
+            raise ValueError(f"Tool '{lc_tool.name}' is already registered")
+        self._tools[lc_tool.name] = Tool(
+            lc_tool=lc_tool, label=label or lc_tool.name.replace("_", " ").capitalize()
+        )
 
     def get(self, name: str) -> Tool | None:
         return self._tools.get(name)
@@ -122,13 +147,14 @@ class ToolRegistry:
         except json.JSONDecodeError as exc:
             return ToolResult(ok=False, error=f"Arguments are not valid JSON: {exc}")
         try:
-            args = tool.args_model.model_validate(raw)
+            data = await tool.lc_tool.ainvoke(
+                raw, config={"configurable": {TOOL_CONTEXT_KEY: ctx}, "run_name": name}
+            )
         except ValidationError as exc:
             return ToolResult(ok=False, error="Invalid arguments:\n" + format_validation_error(exc))
-        try:
-            return ToolResult(ok=True, data=await tool.func(args, ctx))
         except ToolError as exc:
             return ToolResult(ok=False, error=str(exc))
         except Exception:
             logger.exception("tool %s failed", name)
             return ToolResult(ok=False, error=f"Internal error while running '{name}'.")
+        return ToolResult(ok=True, data=data)

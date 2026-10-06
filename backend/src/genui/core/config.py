@@ -28,6 +28,11 @@ class Settings(BaseSettings):
     llm_max_retries: int = 3  # transient errors (429/5xx/connection), with visible status
     llm_reasoning_effort: Literal["low", "medium", "high"] | None = "medium"
 
+    # LangSmith tracing (optional; works out of the box with LangChain models and tools)
+    langsmith_tracing: bool = False
+    langsmith_api_key: SecretStr | None = None
+    langsmith_project: str = "fitgen"
+
     # Agent
     agent_max_steps: int = 8
     agent_max_ui_repairs: int = 2

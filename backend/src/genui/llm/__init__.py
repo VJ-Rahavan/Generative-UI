@@ -8,16 +8,17 @@ from genui.llm.base import (
     ToolCall,
     ToolSpec,
 )
-from genui.llm.groq_provider import GroqProvider
+from genui.llm.langchain_provider import LangChainProvider, build_chat_model
 
 __all__ = [
     "ChatMessage",
     "Completion",
-    "GroqProvider",
     "LLMError",
     "LLMProvider",
+    "LangChainProvider",
     "StreamItem",
     "TextDelta",
     "ToolCall",
     "ToolSpec",
+    "build_chat_model",
 ]
