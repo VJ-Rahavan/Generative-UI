@@ -1,57 +1,53 @@
-"""Parse and validate `render_ui` tool-call arguments produced by the LLM."""
+"""Validate individual UI components produced by the LLM.
 
-import json
-from dataclasses import dataclass, field
+Components are validated one at a time so each can be shown as soon as it has been
+generated (see `genui.ui.stream`).
+"""
+
+from dataclasses import dataclass
 from typing import Any
 
-from pydantic import ValidationError
+from pydantic import TypeAdapter, ValidationError
 
 from genui.core.schema_utils import format_validation_error, strip_titles
-from genui.ui.components import UISpec
+from genui.ui.components import Component, UISpec
 
 MAX_NESTING_DEPTH = 6
 
+_COMPONENT = TypeAdapter[Any](Component)
 
-@dataclass(slots=True)
-class UIParseResult:
-    ok: bool
-    components: list[dict[str, Any]] = field(default_factory=list)
+
+@dataclass(slots=True, frozen=True)
+class ComponentResult:
+    component: dict[str, Any] | None = None
     error: str | None = None
 
+    @property
+    def ok(self) -> bool:
+        return self.component is not None
 
-def parse_ui_arguments(raw: str | dict[str, Any] | list[Any]) -> UIParseResult:
-    """Validate raw tool arguments into JSON-ready component dicts.
 
-    Lenient about envelope shape (bare list, JSON-encoded string), strict about components.
-    """
+def validate_component(raw: Any) -> ComponentResult:
+    """Validate one top-level component into a JSON-ready dict (or a readable error)."""
+    if not isinstance(raw, dict):
+        return ComponentResult(error="each component must be a JSON object")
     try:
-        data: Any = json.loads(raw) if isinstance(raw, str) else raw
-        if isinstance(data, list):
-            data = {"components": data}
-        if isinstance(data, dict) and isinstance(data.get("components"), str):
-            data["components"] = json.loads(data["components"])
-    except json.JSONDecodeError as exc:
-        return UIParseResult(ok=False, error=f"Arguments are not valid JSON: {exc}")
-
-    try:
-        spec = UISpec.model_validate(data)
+        model = _COMPONENT.validate_python(raw)
     except ValidationError as exc:
-        return UIParseResult(ok=False, error=format_validation_error(exc))
-
-    components = [c.model_dump(mode="json", exclude_none=True) for c in spec.components]
-    depth = max(_depth(c) for c in components)
-    if depth > MAX_NESTING_DEPTH:
-        return UIParseResult(
-            ok=False, error=f"Components nested {depth} levels deep; max is {MAX_NESTING_DEPTH}."
+        return ComponentResult(error=format_validation_error(exc))
+    component: dict[str, Any] = model.model_dump(mode="json", exclude_none=True)
+    if (depth := _depth(component)) > MAX_NESTING_DEPTH:
+        return ComponentResult(
+            error=f"nested {depth} levels deep; the maximum is {MAX_NESTING_DEPTH}"
         )
-    return UIParseResult(ok=True, components=components)
+    return ComponentResult(component=component)
 
 
 def ui_json_schema() -> dict[str, Any]:
-    """Schema of `UISpec` (with $defs, since components are recursive) for prompts/clients."""
+    """Schema of the component catalog (with $defs, since components are recursive)."""
     return strip_titles(UISpec.model_json_schema())
 
 
 def _depth(node: dict[str, Any]) -> int:
     children = node.get("children") or []
-    return 1 + max((_depth(c) for c in children), default=0)
+    return 1 + max((_depth(c) for c in children if isinstance(c, dict)), default=0)

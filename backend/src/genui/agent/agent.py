@@ -3,41 +3,35 @@
 Per user turn:
   1. Persist the user message, load trimmed history.
   2. Loop (bounded by `agent_max_steps`):
-     - stream the LLM; forward text deltas
+     - stream the LLM; the answer text goes through `AnswerStreamParser`, which forwards
+       prose and emits each UI component the moment its JSON is complete (streaming UI)
      - run data tool calls, feeding results back
-     - validate `render_ui` calls; emit valid UI, return validation errors to the model to repair
-     - stop once UI rendered successfully, or the model answers without tool calls
+     - if some components were invalid, ask the model for corrected versions (bounded)
+     - stop once the model answers without tool calls
   3. Persist each step atomically (assistant message + its tool results) so history stays valid.
 """
 
 import asyncio
 import json
 import logging
-import re
-import uuid
 from collections.abc import AsyncIterator, Callable
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import Any
 
 from langsmith import traceable
 
 from genui.agent.events import AgentEvent
 from genui.agent.history import compact_history
-from genui.agent.prompts import RENDER_UI_SPEC, RENDER_UI_TOOL
 from genui.core.config import Settings
 from genui.db.session import SessionFactory
-from genui.llm import ChatMessage, Completion, LLMError, LLMProvider, TextDelta, ToolCall
+from genui.llm import ChatMessage, Completion, LLMError, LLMProvider, TextDelta
 from genui.services.conversations import Block, ConversationRepository
 from genui.tools import ToolContext, ToolRegistry
-from genui.ui.validation import parse_ui_arguments
+from genui.ui.stream import AnswerStreamParser, ParseEvent, TextOut, UIComponent, UIEnd, UIStart
 
 logger = logging.getLogger(__name__)
 
 _MAX_TOOL_USE_RETRIES = 2
-_UI_AS_TEXT_NUDGE = (
-    "[system] You wrote UI JSON as message text, which the user cannot see as an interface. "
-    "Call the render_ui tool with the components instead, and fix any invalid fields."
-)
 _MAX_RETRY_DELAY_SECONDS = 60.0
 
 
@@ -46,37 +40,9 @@ class _RetryNotice:
     message: str
 
 
-class _TextGate:
-    """Streams assistant text, but holds it back when it starts like JSON or a code fence —
-    i.e. the model wrote a UI spec as text instead of calling `render_ui`. Held text is
-    recovered as real UI (or released as text) once the step completes."""
-
-    def __init__(self) -> None:
-        self._buffer = ""
-        self._mode: str = "undecided"  # -> "stream" | "hold"
-
-    @property
-    def held(self) -> bool:
-        return self._mode == "hold"
-
-    def feed(self, delta: str) -> str:
-        """Return the text to forward to the client now."""
-        if self._mode == "stream":
-            return delta
-        self._buffer += delta
-        if self._mode == "hold":
-            return ""
-        stripped = self._buffer.lstrip()
-        if not stripped:
-            return ""
-        if stripped[0] in "{[`":
-            self._mode = "hold"
-            return ""
-        self._mode = "stream"
-        return self._buffer
-
-
-_FENCE = re.compile(r"^```[a-zA-Z]*\s*|\s*```$")
+@dataclass(slots=True)
+class _StepOutput:
+    completion: Completion | None = None
 
 
 class ConversationNotFoundError(Exception):
@@ -104,17 +70,6 @@ class UserInput:
         return cls(llm_content=content, display=display, title=label or action.replace("_", " "))
 
 
-@dataclass(slots=True)
-class _Step:
-    """Outcome of processing one LLM completion."""
-
-    assistant: ChatMessage
-    display: list[Block] = field(default_factory=list)
-    tool_messages: list[ChatMessage] = field(default_factory=list)
-    rendered: bool = False
-    ui_failed: bool = False
-
-
 class ChatAgent:
     def __init__(
         self,
@@ -130,7 +85,7 @@ class ChatAgent:
         self._session_factory = session_factory
         self._settings = settings
         self._system_prompt = system_prompt
-        self._tool_specs = [RENDER_UI_SPEC, *tools.specs()]
+        self._tool_specs = tools.specs()
 
     async def run(
         self, *, user_id: str, conversation_id: str | None, user_input: UserInput
@@ -150,7 +105,7 @@ class ChatAgent:
         },
         reduce_fn=lambda events: {
             "events": [e.type for e in events],
-            "ui": [e.data for e in events if e.type == "ui"],
+            "components": [e.data["component"] for e in events if e.type == "ui_component"],
         },
     )
     async def _run_turn(
@@ -169,80 +124,51 @@ class ChatAgent:
             {"role": "user", "content": user_input.llm_content},
         ]
         ctx = ToolContext(user_id=user_id, session_factory=self._session_factory)
-        ui_failures = 0
+        repairs = 0
+        rendered_any = False
 
         try:
             for _ in range(self._settings.agent_max_steps):
-                completion: Completion | None = None
-                gate = _TextGate()
-                async for item in self._stream_with_retry(messages):
-                    if isinstance(item, TextDelta):
-                        if visible := gate.feed(item.text):
-                            yield AgentEvent("text", {"delta": visible})
-                    elif isinstance(item, _RetryNotice):
-                        yield AgentEvent("status", {"message": item.message})
-                    else:
-                        completion = item
+                parser, out = AnswerStreamParser(), _StepOutput()
+                async for event in self._stream_step(messages, parser, out):
+                    yield event
+                completion = out.completion
                 assert completion is not None
+                rendered_any = rendered_any or parser.component_count > 0
 
-                if not completion.tool_calls and gate.held:
-                    # The model wrote JSON as text. Recover it as UI if it's a valid spec.
-                    ui_text = _FENCE.sub("", completion.text.strip())
-                    if parse_ui_arguments(ui_text).ok:
-                        call = ToolCall(
-                            id=f"call_{uuid.uuid4().hex[:12]}", name=RENDER_UI_TOOL,
-                            arguments=ui_text,
-                        )  # fmt: skip
-                        completion = Completion(text="", tool_calls=[call])
-                    elif '"type"' in ui_text or "components" in ui_text:
-                        ui_failures += 1
-                        if ui_failures > self._settings.agent_max_ui_repairs:
-                            yield _error("Sorry, I couldn't build a valid interface for that. "
-                                         "Try rephrasing your request.", "ui_invalid")  # fmt: skip
-                            return
-                        messages.append({"role": "assistant", "content": completion.text})
-                        messages.append({"role": "user", "content": _UI_AS_TEXT_NUDGE})
-                        yield AgentEvent("status", {"message": "Refining the interface…"})
-                        continue
-                    else:
-                        yield AgentEvent("text", {"delta": completion.text})
-
-                if not completion.tool_calls:
-                    if completion.text.strip():
-                        await self._persist(
-                            conversation_id,
-                            [("assistant", {"role": "assistant", "content": completion.text},
-                              [{"type": "text", "text": completion.text}])],
-                        )  # fmt: skip
-                    else:
-                        yield _error("The model returned an empty response. Please try again.")
-                    return
-
-                step = _Step(assistant=_assistant_message(completion))
-                if completion.text.strip() and not gate.held:
-                    step.display.append({"type": "text", "text": completion.text})
-
-                for call in completion.tool_calls:
-                    async for event in self._handle_call(call, ctx, step):
+                assistant: ChatMessage = {"role": "assistant", "content": completion.text or None}
+                if completion.tool_calls:
+                    assistant["tool_calls"] = [c.to_message() for c in completion.tool_calls]
+                    tool_messages: list[ChatMessage] = []
+                    async for event in self._run_tools(completion, ctx, tool_messages):
                         yield event
+                    messages += [assistant, *tool_messages]
+                    await self._persist(
+                        conversation_id,
+                        [("assistant", assistant, parser.display_blocks() or None)]
+                        + [("tool", m, None) for m in tool_messages],
+                    )
+                    continue
 
-                messages.append(step.assistant)
-                messages.extend(step.tool_messages)
-                await self._persist(
-                    conversation_id,
-                    [("assistant", step.assistant, step.display or None)]
-                    + [("tool", m, None) for m in step.tool_messages],
-                )
-
-                if step.rendered and not step.ui_failed:
+                # Final answer (no tool calls).
+                if not completion.text.strip():
+                    yield _error("The model returned an empty response. Please try again.")
                     return
-                if step.ui_failed:
-                    ui_failures += 1
-                    if ui_failures > self._settings.agent_max_ui_repairs:
+                await self._persist(
+                    conversation_id, [("assistant", assistant, parser.display_blocks() or None)]
+                )
+                if not parser.errors:
+                    return
+
+                logger.info("invalid UI components:\n%s", "\n".join(parser.errors))
+                if repairs >= self._settings.agent_max_ui_repairs:
+                    if not rendered_any:
                         yield _error("Sorry, I couldn't build a valid interface for that. "
                                      "Try rephrasing your request.", "ui_invalid")  # fmt: skip
-                        return
-                    yield AgentEvent("status", {"message": "Refining the interface…"})
+                    return
+                repairs += 1
+                yield AgentEvent("status", {"message": "Fixing part of the interface…"})
+                messages += [assistant, {"role": "user", "content": _repair_prompt(parser)}]
 
             yield _error("Reached the step limit before finishing. Try a narrower request.")
         except LLMError as exc:
@@ -277,12 +203,41 @@ class ChatAgent:
             await session.commit()
             return conversation.id, conversation.title, history
 
+    async def _stream_step(
+        self, messages: list[ChatMessage], parser: AnswerStreamParser, out: _StepOutput
+    ) -> AsyncIterator[AgentEvent]:
+        """Stream one LLM call, turning its text into prose and UI events as it arrives."""
+        async for item in self._stream_with_retry(messages):
+            if isinstance(item, TextDelta):
+                for parsed in parser.feed(item.text):
+                    yield _to_event(parsed)
+            elif isinstance(item, _RetryNotice):
+                yield AgentEvent("status", {"message": item.message})
+            else:
+                out.completion = item
+        for parsed in parser.finish():
+            yield _to_event(parsed)
+
+    async def _run_tools(
+        self, completion: Completion, ctx: ToolContext, results: list[ChatMessage]
+    ) -> AsyncIterator[AgentEvent]:
+        """Execute the step's tool calls, appending tool-result messages to `results`."""
+        for call in completion.tool_calls:
+            label = self._tools.label(call.name)
+            yield AgentEvent("tool_start", {"id": call.id, "name": call.name, "label": label})
+            outcome = await self._tools.execute(call.name, call.arguments, ctx)
+            yield AgentEvent("tool_end", {"id": call.id, "name": call.name, "ok": outcome.ok})
+            results.append(
+                {"role": "tool", "tool_call_id": call.id,
+                 "content": self._tool_content(outcome.to_llm())}
+            )  # fmt: skip
+
     async def _stream_with_retry(
         self, messages: list[ChatMessage]
     ) -> AsyncIterator[TextDelta | Completion | _RetryNotice]:
         """Stream one LLM step, retrying transient failures and malformed tool calls.
 
-        Retries happen only if nothing was streamed to the client yet (so text is never
+        Retries happen only if nothing was streamed to the client yet (so output is never
         duplicated). Waits are surfaced as notices instead of a silent spinner.
         """
         tool_use_retries = transient_retries = 0
@@ -309,40 +264,11 @@ class ChatAgent:
                 yield _RetryNotice(f"{reason} — continuing in {delay:.0f}s…")
                 await asyncio.sleep(delay)
 
-    async def _handle_call(
-        self, call: ToolCall, ctx: ToolContext, step: _Step
-    ) -> AsyncIterator[AgentEvent]:
-        if call.name == RENDER_UI_TOOL:
-            parsed = parse_ui_arguments(call.arguments)
-            if parsed.ok:
-                block: Block = {
-                    "type": "ui",
-                    "id": uuid.uuid4().hex[:12],
-                    "components": parsed.components,
-                }
-                step.display.append(block)
-                step.rendered = True
-                result: dict[str, Any] = {"ok": True, "message": "UI rendered to the user."}
-                yield AgentEvent("ui", block)
-            else:
-                step.ui_failed = True
-                logger.info("render_ui validation failed:\n%s", parsed.error)
-                result = {
-                    "ok": False,
-                    "error": "Invalid components; nothing was shown. Fix these and call "
-                    f"render_ui again:\n{parsed.error}",
-                }
-        else:
-            label = self._tools.label(call.name)
-            yield AgentEvent("tool_start", {"id": call.id, "name": call.name, "label": label})
-            outcome = await self._tools.execute(call.name, call.arguments, ctx)
-            yield AgentEvent("tool_end", {"id": call.id, "name": call.name, "ok": outcome.ok})
-            result = outcome.to_llm()
-
+    def _tool_content(self, result: dict[str, Any]) -> str:
         content = json.dumps(result, ensure_ascii=False, default=str)
         if len(content) > self._settings.tool_result_max_chars:
             content = content[: self._settings.tool_result_max_chars] + "…[truncated]"
-        step.tool_messages.append({"role": "tool", "tool_call_id": call.id, "content": content})
+        return content
 
     async def _persist(
         self, conversation_id: str, rows: list[tuple[str, ChatMessage, list[Block] | None]]
@@ -352,11 +278,27 @@ class ChatAgent:
             await session.commit()
 
 
-def _assistant_message(completion: Completion) -> ChatMessage:
-    message: ChatMessage = {"role": "assistant", "content": completion.text or None}
-    if completion.tool_calls:
-        message["tool_calls"] = [c.to_message() for c in completion.tool_calls]
-    return message
+def _to_event(parsed: ParseEvent) -> AgentEvent:
+    match parsed:
+        case TextOut(text=text):
+            return AgentEvent("text", {"delta": text})
+        case UIStart(block_id=block_id):
+            return AgentEvent("ui_start", {"id": block_id})
+        case UIComponent(block_id=block_id, component=component):
+            return AgentEvent("ui_component", {"id": block_id, "component": component})
+        case UIEnd(block_id=block_id):
+            return AgentEvent("ui_end", {"id": block_id})
+    raise TypeError(f"unknown parse event: {parsed!r}")
+
+
+def _repair_prompt(parser: AnswerStreamParser) -> str:
+    n = parser.component_count
+    shown = "Nothing was" if not n else f"{n} component{'s were' if n > 1 else ' was'}"
+    return (
+        f"[system] {shown} rendered. These components were invalid and NOT shown:\n"
+        + "\n".join(parser.errors)
+        + "\nWrite a new ```ui block containing only corrected versions of these components."
+    )
 
 
 def _error(message: str, code: str | None = None) -> AgentEvent:

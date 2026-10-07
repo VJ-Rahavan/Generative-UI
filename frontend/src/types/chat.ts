@@ -9,6 +9,8 @@ export interface UIBlock {
   type: 'ui'
   id: string
   components: UINode[]
+  /** Client-only: more components are still being generated. */
+  streaming?: boolean
 }
 
 export interface EventBlock {
@@ -57,7 +59,9 @@ export type StreamEvent =
   | { event: 'text'; data: { delta: string } }
   | { event: 'tool_start'; data: { id: string; name: string; label: string } }
   | { event: 'tool_end'; data: { id: string; name: string; ok: boolean } }
-  | { event: 'ui'; data: UIBlock }
+  | { event: 'ui_start'; data: { id: string } }
+  | { event: 'ui_component'; data: { id: string; component: UINode } }
+  | { event: 'ui_end'; data: { id: string } }
   | { event: 'status'; data: { message: string } }
   | { event: 'error'; data: { message: string; code?: string | null } }
   | { event: 'done'; data: Record<string, never> }

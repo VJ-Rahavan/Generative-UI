@@ -40,6 +40,7 @@ interface AssistantTurnProps {
 
 export function AssistantTurn({ turn, live, activities, status }: AssistantTurnProps) {
   const empty = turn.blocks.length === 0
+  const uiStreaming = turn.blocks.some((b) => b.type === 'ui' && b.streaming)
   return (
     <div className="flex animate-fade-in gap-3">
       <img src="/favicon.svg" alt="" className="mt-0.5 size-7 shrink-0" />
@@ -53,7 +54,7 @@ export function AssistantTurn({ turn, live, activities, status }: AssistantTurnP
         {live && empty && activities.length === 0 && !status && (
           <p className="shimmer-text pt-1 text-sm font-medium">Thinking…</p>
         )}
-        {live && !empty && activities.every((a) => a.state !== 'running') && !status && (
+        {live && !empty && !uiStreaming && activities.every((a) => a.state !== 'running') && !status && (
           <p className="shimmer-text text-sm font-medium">Composing…</p>
         )}
       </div>
@@ -66,7 +67,7 @@ function BlockView({ block }: { block: Block }) {
     case 'text':
       return block.text.trim() ? <Markdown>{block.text}</Markdown> : null
     case 'ui':
-      return <UIRenderer components={block.components} />
+      return <UIRenderer components={block.components} streaming={block.streaming} />
     case 'error':
       return (
         <div className="flex items-start gap-2.5 rounded-xl border border-bad/30 bg-bad/10 px-4 py-3 text-sm text-bad">

@@ -15,10 +15,16 @@ import { TextView } from './components/TextView'
 import { TimerView } from './components/TimerView'
 import { WorkoutPlanView } from './components/WorkoutPlanView'
 
-// Recharts is large: load it the first time a chart is rendered.
-const LazyChart = lazy(() =>
-  import('./components/ChartView').then((m) => ({ default: m.ChartView })),
-)
+// Recharts is large: keep it out of the initial bundle, but fetch it while the browser is
+// idle so it's ready before the first chart streams in (loading it mid-stream would block
+// the main thread and make streamed components appear in a burst).
+const loadChart = () => import('./components/ChartView')
+const LazyChart = lazy(() => loadChart().then((m) => ({ default: m.ChartView })))
+
+if (typeof window !== 'undefined') {
+  const idle = window.requestIdleCallback ?? ((cb: () => void) => window.setTimeout(cb, 1500))
+  idle(() => void loadChart())
+}
 
 function ChartView(props: { node: Extract<UINode, { type: 'chart' }> }) {
   return (
@@ -64,12 +70,36 @@ export function UINodeView({ node }: { node: UINode }) {
   )
 }
 
-export function UIRenderer({ components }: { components: UINode[] }) {
+export function UIRenderer({
+  components,
+  streaming = false,
+}: {
+  components: UINode[]
+  streaming?: boolean
+}) {
   return (
     <div className="flex flex-col gap-4">
       {components.map((node, i) => (
-        <UINodeView key={i} node={node} />
+        // Stable index keys: earlier components never re-mount as new ones stream in.
+        <div key={i} className="animate-fade-in" data-component={node.type}>
+          <UINodeView node={node} />
+        </div>
       ))}
+      {streaming && <ComponentSkeleton />}
+    </div>
+  )
+}
+
+/** Placeholder for the component currently being generated. */
+function ComponentSkeleton() {
+  return (
+    <div
+      aria-label="Generating"
+      className="flex animate-pulse flex-col gap-3 rounded-2xl border border-border/60 bg-surface p-5"
+    >
+      <div className="h-3 w-1/3 rounded bg-surface-3" />
+      <div className="h-3 w-2/3 rounded bg-surface-3" />
+      <div className="h-3 w-1/2 rounded bg-surface-3" />
     </div>
   )
 }

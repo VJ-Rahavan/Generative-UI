@@ -17,20 +17,28 @@ calculating macros) and renders the result.
           │
           ▼
  POST /api/chat ──► Agent loop (backend/src/genui/agent/agent.py)
-                      │  1. Stream the LLM (LangChain ChatGroq) with tools:
-                      │       data tools  → read/write the DB (workouts, metrics, plans…)
-                      │       render_ui   → a list of UI components
-                      │  2. Validate render_ui against the Pydantic component catalog.
-                      │     Invalid → errors go back to the model to repair.
+                      │  1. Stream the LLM (LangChain ChatGroq). It calls data tools
+                      │     (read/write workouts, metrics, plans…) as needed, then writes
+                      │     its answer with a ```ui block: one JSON component per line.
+                      │  2. AnswerStreamParser (ui/stream.py) reads the text as it streams,
+                      │     validates each component against the Pydantic catalog the
+                      │     moment its JSON closes, and emits it immediately.
+                      │     Invalid → only those components go back to the model to fix.
                       │  3. Persist every step; stream events to the browser (SSE).
                       ▼
- SSE events: text · tool_start/tool_end · ui · status · error · done
+ SSE events: text · tool_start/tool_end · ui_start · ui_component (×N) · ui_end
+             · status · error · done
           │
           ▼
  React renderer: one component per catalog type (frontend/src/components/genui/)
           │
  Button click / form submit ──► POST /api/chat { event: {action, payload} } ──► …
 ```
+
+**Why the UI streams as text.** Groq sends a tool call's arguments in one piece at the end,
+so UI passed through a tool call can only appear all at once. Message text streams token by
+token, so the model writes components as text and each one appears as soon as it has been
+generated, with a skeleton showing while the next is on its way.
 
 **Why it's safe.** The model never writes HTML or JavaScript. It can only pick from a fixed
 catalog of 14 components, and the backend validates every component before it reaches the
@@ -67,13 +75,14 @@ backend/src/genui/
   db/                   Async engine/session (create_all, no migrations), chat tables
   ui/
     components.py       ★ The component catalog (Pydantic): the LLM ↔ frontend contract
-    validation.py       Parses and validates render_ui arguments
+    validation.py       Validates one component at a time
+    stream.py           ★ Streaming parser: prose + ```ui block → validated components as they arrive
     catalog.py          Compact catalog text for the system prompt (generated from the models)
   llm/                  LLMProvider protocol + LangChain implementation (ChatGroq, message conversion)
   tools/registry.py     @registry.tool → LangChain StructuredTool; register() accepts any LangChain tool
   agent/
     agent.py            ★ The agent loop (streaming, tools, UI validation/repair, retries)
-    prompts.py          Generic UI rules + render_ui tool definition
+    prompts.py          Generic streaming-UI rules (```ui block format) + component catalog
     history.py          Compacts earlier turns to save tokens
     events.py           SSE event types
   services/             Conversation repository, grouping messages into turns

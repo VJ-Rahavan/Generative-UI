@@ -50,3 +50,5 @@ check_untyped_defs = true
 [tool.ruff.lint.per-file-ignores]
 # Static reference data table
 "src/genui/domain/fitness/exercises.py" = ["E501"]
+# Prompt example must show single-line JSON components
+"src/genui/agent/prompts.py" = ["E501"]

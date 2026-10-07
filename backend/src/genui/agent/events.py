@@ -1,11 +1,13 @@
 """Events streamed from the agent to the client (sent as SSE `event:` / `data:` pairs).
 
 conversation  {conversation_id, title}        first event of every stream
-text          {delta}                         assistant text chunk
+text          {delta}                         assistant prose chunk
 tool_start    {id, name, label}               a data tool started
 tool_end      {id, name, ok}                  a data tool finished
-ui            {type: "ui", id, components}    validated components to render
-status        {message}                       transient progress note (e.g. repairing UI)
+ui_start      {id}                            a UI block opened (more components coming)
+ui_component  {id, component}                 one validated component, streamed as generated
+ui_end        {id}                            the UI block is complete
+status        {message}                       transient progress note (rate limit, repair)
 error         {message, code}                 recoverable failure for this turn
 done          {}                              always the last event
 """
@@ -15,7 +17,16 @@ from dataclasses import dataclass
 from typing import Any, Literal
 
 EventType = Literal[
-    "conversation", "text", "tool_start", "tool_end", "ui", "status", "error", "done"
+    "conversation",
+    "text",
+    "tool_start",
+    "tool_end",
+    "ui_start",
+    "ui_component",
+    "ui_end",
+    "status",
+    "error",
+    "done",
 ]
 
 

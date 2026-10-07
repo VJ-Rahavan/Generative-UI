@@ -3,6 +3,13 @@ import { api } from '../lib/api'
 import { uid } from '../lib/format'
 import type { Activity, Block, ChatInput, Turn } from '../types/chat'
 
+/** Mark UI blocks complete (one by id, or all) and drop blocks that ended up empty. */
+function closeUIBlocks(blocks: Block[], id?: string): Block[] {
+  return blocks
+    .map((b) => (b.type === 'ui' && (!id || b.id === id) ? { ...b, streaming: false } : b))
+    .filter((b) => b.type !== 'ui' || b.streaming || b.components.length > 0)
+}
+
 interface UseChatOptions {
   /** Called when a turn finishes (e.g. to refresh the conversation list). */
   onTurnComplete?: () => void
@@ -86,9 +93,25 @@ export function useChat({ onTurnComplete }: UseChatOptions = {}) {
                 ),
               )
               break
-            case 'ui':
+            case 'ui_start':
               setStatus(null)
-              updateAssistant((blocks) => [...blocks, ev.data])
+              updateAssistant((blocks) => [
+                ...blocks,
+                { type: 'ui', id: ev.data.id, components: [], streaming: true },
+              ])
+              break
+            case 'ui_component':
+              // Streamed UI: each component is appended the moment it has been generated.
+              updateAssistant((blocks) =>
+                blocks.map((b) =>
+                  b.type === 'ui' && b.id === ev.data.id
+                    ? { ...b, components: [...b.components, ev.data.component] }
+                    : b,
+                ),
+              )
+              break
+            case 'ui_end':
+              updateAssistant((blocks) => closeUIBlocks(blocks, ev.data.id))
               break
             case 'status':
               setStatus(ev.data.message)
@@ -103,6 +126,7 @@ export function useChat({ onTurnComplete }: UseChatOptions = {}) {
           appendError(err instanceof Error ? err.message : 'Connection lost.')
         }
       } finally {
+        updateAssistant((blocks) => closeUIBlocks(blocks))
         abortRef.current = null
         setIsStreaming(false)
         setStatus(null)

@@ -1,16 +1,20 @@
 """Compact earlier turns before replaying them to the LLM.
 
-Past `render_ui` calls are the bulk of the history (full component JSON), so they are replaced
-by a one-line text outline of what was shown. Past data-tool results are truncated. The model
-keeps the gist of the conversation at a fraction of the tokens, and never sees an abbreviated
-`render_ui` call it might imitate.
+Past UI is the bulk of the history (full component JSON), so each ```ui block is replaced by
+a one-line text outline of what was shown. Past data-tool results are truncated. The model
+keeps the gist of the conversation at a fraction of the tokens.
+
+Conversations created before streaming UI used a `render_ui` tool call instead; those calls
+(and their tool results) are compacted the same way.
 """
 
 import json
 from typing import Any
 
-from genui.agent.prompts import RENDER_UI_TOOL
 from genui.llm import ChatMessage
+from genui.ui.stream import parse_answer
+
+LEGACY_RENDER_UI_TOOL = "render_ui"
 
 _OUTLINE_MAX_CHARS = 700
 
@@ -21,10 +25,12 @@ def compact_history(messages: list[ChatMessage], *, tool_result_chars: int) -> l
 
     for message in messages:
         role = message.get("role")
+        if role == "assistant" and "```" in str(message.get("content") or ""):
+            message = {**message, "content": compact_answer(str(message["content"]))}
         if role == "assistant" and message.get("tool_calls"):
             kept_calls, outlines = [], []
             for call in message["tool_calls"]:
-                if call["function"]["name"] == RENDER_UI_TOOL:
+                if call["function"]["name"] == LEGACY_RENDER_UI_TOOL:
                     ui_call_ids.add(call["id"])
                     outlines.append(outline_ui(call["function"]["arguments"]))
                 else:
@@ -48,14 +54,27 @@ def compact_history(messages: list[ChatMessage], *, tool_result_chars: int) -> l
     return compacted
 
 
+def compact_answer(content: str) -> str:
+    """Replace the ```ui block(s) of a stored answer with a one-line outline."""
+    parsed = parse_answer(content)
+    if not parsed.ui_opened:
+        return content
+    return "\n".join(filter(None, [parsed.prose_text(), outline_components(parsed.components())]))
+
+
 def outline_ui(arguments: str) -> str:
-    """Human-readable outline of a render_ui call, e.g. for history or logs."""
+    """Outline of a legacy render_ui tool call."""
     try:
         data = json.loads(arguments)
         components = data.get("components", data) if isinstance(data, dict) else data
-        parts = [_describe(c) for c in components if isinstance(c, dict)]
-    except (json.JSONDecodeError, AttributeError, TypeError):
+    except json.JSONDecodeError:
         return "[Showed UI]"
+    return outline_components(components if isinstance(components, list) else [])
+
+
+def outline_components(components: list[Any]) -> str:
+    """Human-readable outline of rendered components, e.g. for history or logs."""
+    parts = [_describe(c) for c in components if isinstance(c, dict)]
     text = "[Showed UI: " + "; ".join(p for p in parts if p) + "]"
     return text if len(text) <= _OUTLINE_MAX_CHARS else text[: _OUTLINE_MAX_CHARS - 2] + "…]"
 
