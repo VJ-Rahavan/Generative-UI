@@ -1,1 +1,1 @@
-"""FitGen generative UI backend."""
+"""FitTrack generative UI backend."""

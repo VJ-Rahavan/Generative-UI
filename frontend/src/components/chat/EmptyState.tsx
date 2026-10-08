@@ -25,7 +25,7 @@ export function EmptyState({ onPick }: { onPick: (prompt: string) => void }) {
         What are we training today?
       </h1>
       <p className="mt-3 max-w-lg text-muted">
-        Ask about your progress, plan a program or log a session. FitGen answers with live
+        Ask about your progress, plan a program or log a session. FitTrack answers with live
         dashboards, charts and forms built from your training data.
       </p>
       <div className="mt-10 grid w-full grid-cols-1 gap-3 sm:grid-cols-2 lg:grid-cols-3">

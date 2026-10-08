@@ -1,6 +1,6 @@
-# FitGen: a generative UI fitness coach
+# FitTrack: a generative UI fitness coach
 
-FitGen is an AI fitness coach that **answers with interactive UI instead of text**. Ask "How did
+FitTrack is an AI fitness coach that **answers with interactive UI instead of text**. Ask "How did
 my training go this week?" and the model fetches your real training data, then composes a
 dashboard of metrics, charts, tables and buttons on the fly. Clicking a button or submitting a form
 sends the interaction back to the model, which acts on it (logging a workout, saving a plan,
@@ -60,7 +60,7 @@ make install          # uv sync + npm install; creates backend/.env from the exa
 make dev              # backend on :8010, frontend on :5180
 ```
 
-Open **http://localhost:5180**. On first start the backend creates `backend/fitgen.db` and seeds
+Open **http://localhost:5180**. On first start the backend creates `backend/fittrack.db` and seeds
 8 weeks of demo training and body-weight history, so the dashboards have data straight away.
 
 Other commands: `make backend`, `make frontend`, `make lint`, `make format`, `make build`,
@@ -165,8 +165,8 @@ Settings come from environment variables or `backend/.env` (see `backend/.env.ex
 | `LLM_MAX_RETRIES` | `3` | Retries on rate limits and server errors, shown to the user as a status message |
 | `AGENT_MAX_STEPS` / `AGENT_MAX_UI_REPAIRS` | `8` / `2` | Limits per turn |
 | `HISTORY_MAX_MESSAGES` | `40` | Messages from earlier turns sent to the model (compacted) |
-| `LANGSMITH_TRACING` / `LANGSMITH_API_KEY` / `LANGSMITH_PROJECT` | `false` / — / `fitgen` | Optional tracing: each chat turn is one trace, with its LLM and tool calls nested inside |
-| `DATABASE_URL` | `sqlite+aiosqlite:///./fitgen.db` | For Postgres: `postgresql+asyncpg://…` and `uv sync --extra postgres` |
+| `LANGSMITH_TRACING` / `LANGSMITH_API_KEY` / `LANGSMITH_PROJECT` | `false` / — / `fittrack` | Optional tracing: each chat turn is one trace, with its LLM and tool calls nested inside |
+| `DATABASE_URL` | `sqlite+aiosqlite:///./fittrack.db` | For Postgres: `postgresql+asyncpg://…` and `uv sync --extra postgres` |
 | `SEED_DEMO_DATA` | `true` | Seeds demo history for an empty user |
 | `PORT` / `CORS_ORIGINS` | `8010` / `["http://localhost:5180"]` | |
 

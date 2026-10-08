@@ -17,7 +17,7 @@ export function Logo() {
     <div className="flex items-center gap-2.5">
       <img src="/favicon.svg" alt="" className="size-8" />
       <div className="leading-tight">
-        <p className="font-semibold tracking-tight">FitGen</p>
+        <p className="font-semibold tracking-tight">FitTrack</p>
         <p className="text-[11px] text-muted">AI training partner</p>
       </div>
     </div>

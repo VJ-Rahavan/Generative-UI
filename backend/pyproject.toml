@@ -1,7 +1,7 @@
 [project]
 name = "genui"
 version = "0.1.0"
-description = "FitGen — a generative UI fitness coach (FastAPI + Groq)"
+description = "FitTrack — a generative UI fitness coach (FastAPI + Groq)"
 readme = "README.md"
 requires-python = ">=3.12"
 dependencies = [

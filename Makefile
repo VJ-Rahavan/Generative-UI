@@ -1,4 +1,4 @@
-# FitGen — common developer commands. Run `make help` for a list.
+# FitTrack — common developer commands. Run `make help` for a list.
 .DEFAULT_GOAL := help
 SHELL := /bin/bash
 
@@ -38,4 +38,4 @@ build: ## Production build of the frontend (frontend/dist)
 	cd $(FRONTEND) && npm run build
 
 reset-db: ## Delete the local SQLite DB (demo data is re-seeded on next start)
-	rm -f $(BACKEND)/fitgen.db
+	rm -f $(BACKEND)/fittrack.db

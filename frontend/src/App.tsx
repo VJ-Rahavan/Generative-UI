@@ -97,7 +97,7 @@ export default function App() {
           <div className="flex items-center gap-2 border-b border-warn/30 bg-warn/10 px-4 py-2 text-sm text-warn">
             <AlertTriangle className="size-4 shrink-0" />
             {backendDown
-              ? 'Cannot reach the FitGen API. Is the backend running?'
+              ? 'Cannot reach the FitTrack API. Is the backend running?'
               : 'GROQ_API_KEY is not configured on the server — chat is disabled.'}
           </div>
         )}

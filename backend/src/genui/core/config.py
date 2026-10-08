@@ -11,7 +11,7 @@ class Settings(BaseSettings):
     model_config = SettingsConfigDict(env_file=".env", env_file_encoding="utf-8", extra="ignore")
 
     # App
-    app_name: str = "FitGen"
+    app_name: str = "FitTrack"
     environment: Literal["development", "production"] = "development"
     log_level: str = "INFO"
     api_prefix: str = "/api"
@@ -31,7 +31,7 @@ class Settings(BaseSettings):
     # LangSmith tracing (optional; works out of the box with LangChain models and tools)
     langsmith_tracing: bool = False
     langsmith_api_key: SecretStr | None = None
-    langsmith_project: str = "fitgen"
+    langsmith_project: str = "fittrack"
 
     # Agent
     agent_max_steps: int = 8
@@ -41,7 +41,7 @@ class Settings(BaseSettings):
     history_tool_result_chars: int = 1_500  # past turns' tool results are truncated to this
 
     # Database
-    database_url: str = "sqlite+aiosqlite:///./fitgen.db"
+    database_url: str = "sqlite+aiosqlite:///./fittrack.db"
     database_echo: bool = False
 
     # Users (single demo user until auth lands)
